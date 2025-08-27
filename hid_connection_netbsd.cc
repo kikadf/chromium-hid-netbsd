@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "services/device/hid/hid_connection_fido.h"
+#include "services/device/hid/hid_connection_netbsd.h"
 
 #include <errno.h>
 #include <sys/ioctl.h>
@@ -47,16 +47,14 @@ class HidConnectionFido::BlockingTaskRunnerHelper {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
     file_watcher_ = base::FileDescriptorWatcher::WatchReadable(
-        fd_.get(), base::BindRepeating(
-                       &BlockingTaskRunnerHelper::OnFileCanReadWithoutBlocking,
-                       base::Unretained(this)));
+                      fd_.get(), base::BindRepeating(
+                                  &BlockingTaskRunnerHelper::OnFileCanReadWithoutBlocking,
+                                  base::Unretained(this)));
   }
 
-  void Write(scoped_refptr<base::RefCountedBytes> buffer,
-             WriteCallback callback) {
+  void Write(scoped_refptr<base::RefCountedBytes> buffer, WriteCallback callback) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    base::ScopedBlockingCall scoped_blocking_call(
-        FROM_HERE, base::BlockingType::MAY_BLOCK);
+    base::ScopedBlockingCall scoped_blocking_call(FROM_HERE, base::BlockingType::MAY_BLOCK);
 
     auto data = buffer->data();
     size_t size = buffer->size();
@@ -66,41 +64,44 @@ class HidConnectionFido::BlockingTaskRunnerHelper {
       size--;
     }
 
-    ssize_t result =
-        HANDLE_EINTR(write(fd_.get(), data, size));
+    ssize_t result = HANDLE_EINTR(write(fd_.get(), data, size));
     if (result < 0) {
       HID_PLOG(EVENT) << "Write failed";
-      origin_task_runner_->PostTask(FROM_HERE,
-                                    base::BindOnce(std::move(callback), false));
+      origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), false));
     } else {
       if (static_cast<size_t>(result) != size) {
-        HID_LOG(EVENT) << "Incomplete HID write: " << result
-                       << " != " << buffer->size();
+        HID_LOG(EVENT) << "Incomplete HID write: " << result << " != " << buffer->size();
       }
-      origin_task_runner_->PostTask(FROM_HERE,
-                                    base::BindOnce(std::move(callback), true));
+      origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), true));
     }
   }
 
-  void GetFeatureReport(uint8_t report_id,
-                        scoped_refptr<base::RefCountedBytes> buffer,
-                        ReadCallback callback) {
+  void GetFeatureReport(uint8_t report_id, ReadCallback callback) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    base::ScopedBlockingCall scoped_blocking_call(
-        FROM_HERE, base::BlockingType::MAY_BLOCK);
-    HID_PLOG(EVENT) << "GendFeatureReport not implemented on OpenBSD";
-    origin_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback), false, nullptr, 0));
+    base::ScopedBlockingCall scoped_blocking_call(FROM_HERE, base::BlockingType::MAY_BLOCK);
+    struct usb_ctl_report ucr;
+    ucr.ucr_report = UHID_FEATURE_REPORT;
+
+    int result = HANDLE_EINTR(ioctl(fd_.get(), USB_GET_REPORT, &ucr));
+    if (result < 0) {
+      HID_PLOG(EVENT) << "Failed to get feature report";
+      origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), false, nullptr, 0));
+    } else if (result == 0) {
+      HID_LOG(EVENT) << "Get feature result too short.";
+      origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), false, nullptr, 0));
+    } else {
+      size_t received_bytes = static_cast<size_t>(result);
+      scoped_refptr<base::RefCountedBytes> buffer(new base::RefCountedBytes(ucr.ucr_data, received_bytes));
+      origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), true, buffer, result));
+    }
   }
 
   void SendFeatureReport(scoped_refptr<base::RefCountedBytes> buffer,
                          WriteCallback callback) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-    base::ScopedBlockingCall scoped_blocking_call(
-        FROM_HERE, base::BlockingType::MAY_BLOCK);
+    base::ScopedBlockingCall scoped_blocking_call(FROM_HERE, base::BlockingType::MAY_BLOCK);
     HID_PLOG(EVENT) << "SendFeatureReport not implemented on OpenBSD";
-    origin_task_runner_->PostTask(FROM_HERE,
-                                    base::BindOnce(std::move(callback), false));
+    origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), false));
   }
 
  private:
@@ -176,41 +177,34 @@ void HidConnectionFido::PlatformClose() {
   helper_.reset();
 }
 
-void HidConnectionFido::PlatformWrite(
-    scoped_refptr<base::RefCountedBytes> buffer,
-    WriteCallback callback) {
+void HidConnectionFido::PlatformWrite(scoped_refptr<base::RefCountedBytes> buffer,
+                                      WriteCallback callback) {
   // Fido expects the first byte of the buffer to always be a report ID so the
   // buffer can be used directly.
-  blocking_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&BlockingTaskRunnerHelper::Write,
-                                base::Unretained(helper_.get()), buffer,
-                                std::move(callback)));
+  blocking_task_runner_->PostTask(FROM_HERE,
+                                  base::BindOnce(&BlockingTaskRunnerHelper::Write,
+                                    base::Unretained(helper_.get()),
+                                    buffer,
+                                    std::move(callback)));
 }
 
-void HidConnectionFido::PlatformGetFeatureReport(uint8_t report_id,
-                                                  ReadCallback callback) {
-  // The first byte of the destination buffer is the report ID being requested
-  // and is overwritten by the feature report.
-  DCHECK_GT(device_info()->max_feature_report_size(), 0u);
-  auto buffer = base::MakeRefCounted<base::RefCountedBytes>(
-      device_info()->max_feature_report_size() + 1);
-  buffer->as_vector().data()[0] = report_id;
-
-  blocking_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&BlockingTaskRunnerHelper::GetFeatureReport,
-                                base::Unretained(helper_.get()), report_id,
-                                buffer, std::move(callback)));
+void HidConnectionFido::PlatformGetFeatureReport(uint8_t report_id, ReadCallback callback) {
+  blocking_task_runner_->PostTask(FROM_HERE,
+                                  base::BindOnce(&BlockingTaskRunnerHelper::GetFeatureReport,
+                                    base::Unretained(helper_.get()),
+                                    report_id,
+                                    std::move(callback)));
 }
 
-void HidConnectionFido::PlatformSendFeatureReport(
-    scoped_refptr<base::RefCountedBytes> buffer,
-    WriteCallback callback) {
+void HidConnectionFido::PlatformSendFeatureReport(scoped_refptr<base::RefCountedBytes> buffer,
+                                                  WriteCallback callback) {
   // Fido expects the first byte of the buffer to always be a report ID so the
   // buffer can be used directly.
-  blocking_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&BlockingTaskRunnerHelper::SendFeatureReport,
-                                base::Unretained(helper_.get()), buffer,
-                                std::move(callback)));
+  blocking_task_runner_->PostTask(FROM_HERE,
+                                  base::BindOnce(&BlockingTaskRunnerHelper::SendFeatureReport,
+                                    base::Unretained(helper_.get()),
+                                    buffer,
+                                    std::move(callback)));
 }
 
 }  // namespace device
