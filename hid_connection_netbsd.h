@@ -19,22 +19,22 @@ class SequencedTaskRunner;
 
 namespace device {
 
-class HidConnectionFido : public HidConnection {
+class HidConnectionNetBSD : public HidConnection {
  public:
-  HidConnectionFido(
+  HidConnectionNetBSD(
       scoped_refptr<HidDeviceInfo> device_info,
       base::ScopedFD fd,
       scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
       bool allow_protected_reports,
       bool allow_fido_reports);
-  HidConnectionFido(HidConnectionFido&) = delete;
-  HidConnectionFido& operator=(HidConnectionFido&) = delete;
+  HidConnectionNetBSD(HidConnectionNetBSD&) = delete;
+  HidConnectionNetBSD& operator=(HidConnectionNetBSD&) = delete;
 
  private:
-  friend class base::RefCountedThreadSafe<HidConnectionFido>;
+  friend class base::RefCountedThreadSafe<HidConnectionNetBSD>;
   class BlockingTaskRunnerHelper;
 
-  ~HidConnectionFido() override;
+  ~HidConnectionNetBSD() override;
 
   // HidConnection implementation.
   void PlatformClose() override;
@@ -52,7 +52,7 @@ class HidConnectionFido : public HidConnection {
 
   const scoped_refptr<base::SequencedTaskRunner> blocking_task_runner_;
 
-  base::WeakPtrFactory<HidConnectionFido> weak_factory_{this};
+  base::WeakPtrFactory<HidConnectionNetBSD> weak_factory_{this};
 };
 
 }  // namespace device
