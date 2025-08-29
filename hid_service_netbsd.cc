@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdint.h>
+#include <usbhid.h>
 #include <dev/usb/usb.h>
 #include <dev/usb/usbhid.h>
 #include <dlfcn.h>
@@ -33,7 +34,7 @@
 #include "components/device_event_log/device_event_log.h"
 #include "device/udev_linux/scoped_udev.h"
 #include "device/udev_linux/udev_watcher.h"
-#include "services/device/hid/hid_connection_fido.h"
+#include "services/device/hid/hid_connection_netbsd.h"
 
 namespace device {
 
@@ -102,14 +103,17 @@ class HidServiceNetBSD::BlockingTaskRunnerHelper : public UdevWatcher::Observer 
     base::File device_file;
     int flags, result;
     base::ScopedFD fd;
+    struct usb_ctl_report_desc rdesc;
+    struct usb_device_info dinfo;
 
     const char* subsystem = udev_device_get_subsystem(device.get());
     if (!subsystem || strcmp(subsystem, "fido") != 0)
       return;
 
-    const char* device_path = udev_device_get_syspath(device.get());
-    if (!device_path)
+    std::string device_path_ = udev_device_get_syspath(device.get());
+    if (device_path_.empty())
       return;
+    base::FilePath device_path(device_path_);
 
     flags = base::File::FLAG_OPEN | base::File::FLAG_READ | base::File::FLAG_WRITE;
     device_file.Initialize(device_path, flags);
@@ -121,14 +125,13 @@ class HidServiceNetBSD::BlockingTaskRunnerHelper : public UdevWatcher::Observer 
 
     fd.reset(device_file.TakePlatformFile());
 
-    report_desc_t rdesc = hid_get_report_desc(fd);
-    if (rdesc == nullptr) {
-      HID_LOG(ERROR) << "Failed: hid_get_report_desc: " << device_path;
+    result = HANDLE_EINTR(ioctl(fd.get(), USB_GET_REPORT_DESC, &rdesc));
+    if (result < 0) {
+      HID_LOG(ERROR) << "Failed to get reportdesc: " << device_path;
       return;
     }
-    report_descriptor(rdesc->data, rdesc->data + rdesc->size);
+    report_descriptor.assign(rdesc.ucrd_data, rdesc.ucrd_data + rdesc.ucrd_size);
 
-    usb_device_info dinfo;
     result = HANDLE_EINTR(ioctl(fd.get(), USB_GET_DEVICEINFO, &dinfo));
     if (result < 0) {
       HID_LOG(ERROR) << "Failed to get deviceinfo: " << device_path;
@@ -136,15 +139,15 @@ class HidServiceNetBSD::BlockingTaskRunnerHelper : public UdevWatcher::Observer 
     }
 
     scoped_refptr<HidDeviceInfo> device_info(new HidDeviceInfo(
-      device_path,
+      device_path.value(),
       /*physical_device_id*/"",
 	    dinfo.udi_vendorNo,
 	    dinfo.udi_productNo,
-	    null_as_empty(std::string(dinfo.udi_product)),
-	    null_as_empty(std::string(dinfo.udi_serial)),
+	    null_as_empty(dinfo.udi_product),
+	    null_as_empty(dinfo.udi_serial),
       device::mojom::HidBusType::kHIDBusTypeUSB,
-      report_descriptor,
-	    device_path));
+      base::span<const uint8_t>(report_descriptor),
+	    device_path.value()));
 
     task_runner_->PostTask(FROM_HERE,
                            base::BindOnce(&HidServiceNetBSD::AddDevice, service_, device_info));
@@ -259,9 +262,11 @@ void HidServiceNetBSD::FinishOpen(std::unique_ptr<ConnectParams> params) {
 
   std::move(params->callback)
       .Run(base::MakeRefCounted<HidConnectionNetBSD>(
-          std::move(params->device_info), std::move(params->fd),
+          std::move(params->device_info),
+          std::move(params->fd),
           std::move(params->blocking_task_runner),
-          params->allow_protected_reports, params->allow_fido_reports));
+          params->allow_protected_reports,
+          params->allow_fido_reports));
 }
 
 }  // namespace device

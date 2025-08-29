@@ -97,7 +97,8 @@ class HidConnectionNetBSD::BlockingTaskRunnerHelper {
       HID_LOG(EVENT) << "Get feature result too short.";
       origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), false, nullptr, 0));
     } else {
-      scoped_refptr<base::RefCountedBytes> rbuf(new base::RefCountedBytes(ucr.ucr_data, result));
+      scoped_refptr<base::RefCountedBytes> rbuf(new base::RefCountedBytes(
+                                                std::vector<uint8_t>(ucr.ucr_data, ucr.ucr_data + result)));
       origin_task_runner_->PostTask(FROM_HERE, base::BindOnce(std::move(callback), true, rbuf, result));
     }
   }
